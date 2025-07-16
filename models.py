@@ -757,7 +757,8 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                     diffs = ['Beginner', 'Easy', 'Medium', 'Hard', 'Challenge'],
                     maxstep = 12,
                     use_song_length = False,
-                    bpm_method = 'DDCL'
+                    bpm_method = 'DDCL',
+                    progress_callback=None
                     ):
     template = get_template()
     chart_template = get_chart_template()
@@ -773,6 +774,8 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
     for song_fp in os.listdir(in_dir):
         song = os.fsdecode(song_fp)
         if song.endswith('.mp3') or song.endswith('.ogg') or song.endswith('.wav') or song.endswith('.aiff'):
+            if progress_callback:
+                progress_callback.update()
             out_song_path = os.path.join(out_directory, os.path.splitext(song)[0])
             if os.path.isdir(out_song_path):
                 for file in os.listdir(out_song_path):
@@ -789,18 +792,14 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
             fine_diffs = {diffs[i]:topdiff - (4-i) for i in range(5)}
             
             meta_reader = MetadataReader(filename=song_in)
-            metadata = meta_reader()
-            
-            try:
-                artist = metadata[1]
-            except:
-                artist = 'Unknown Artist'
-            try:
-                title = metadata[0]
-                title.replace(":","")
-                title.replace(";","")
-            except:
-                title = 'Unknown Title'
+            metadata = meta_reader() if callable(meta_reader) else ("", "")
+
+            title = metadata[0] if metadata and metadata[0] else os.path.splitext(os.path.basename(song_in))[0]
+            artist = metadata[1] if metadata and metadata[1] else "Unknown Artist"
+
+            # Clean up characters
+            title = title.replace(":", "").replace(";", "")
+            artist = artist.replace(":", "").replace(";", "")
                 
             song_feats = extract_mel_feats(song_in, analyzers, nhop=441)
 
