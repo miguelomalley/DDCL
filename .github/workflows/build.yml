@@ -2,9 +2,9 @@ name: Build Executable
 
 on:
   push:
-    branches: [ main ]
+    branches: [ gui-version ]
   pull_request:
-    branches: [ main ]
+    branches: [ gui-version ]
 
 jobs:
   build:
