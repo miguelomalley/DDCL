@@ -758,7 +758,10 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                     maxstep = 12,
                     use_song_length = False,
                     bpm_method = 'DDCL',
-                    progress_callback=None
+                    progress_callback=None,
+                    max_bpm=200,
+                    min_bpm=80,
+                    model_size = 'Large'
                     ):
     template = get_template()
     chart_template = get_chart_template()
@@ -785,8 +788,7 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
             os.mkdir(out_song_path)
             song_in = os.path.join(in_dir, song_fp)
 
-            song_title = os.path.splitext(os.path.basename(song_in))[0]
-            beats, subdiv_beats, bpm_shift_times, offset, bpm_str, song_length, bpm = set_bpm(song_in, bpm_method=bpm_method)
+            beats, subdiv_beats, bpm_shift_times, offset, bpm_str, song_length, bpm = set_bpm(song_in, bpm_method=bpm_method, max_tempo=max_bpm, min_tempo=min_bpm)
             
             topdiff = int(round((bpm/10)-(3-math.log(song_length,2))))
             fine_diffs = {diffs[i]:topdiff - (4-i) for i in range(5)}
@@ -801,7 +803,10 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
             title = title.replace(":", "").replace(";", "")
             artist = artist.replace(":", "").replace(";", "")
                 
-            song_feats = extract_mel_feats(song_in, analyzers, nhop=441)
+            if model_size=='Large':
+                song_feats = extract_mel_feats(song_in, analyzers, nhop=441)
+            else:
+                song_feats = extract_mel_feats(song_in, analyzers, nhop=441, nffts=[2048])
 
             # First phase: Step placement for all diffs
             all_placed_times = {}
@@ -852,14 +857,11 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                             next_shift_index += 1
                     stream_datas += [new_str_data]
 
-                #stream_datas = [quick_reducify(str_data, indices = [0,1]) for str_data in stream_datas]
                 stream_data_pre = [str_data[:onset_history_len+1] for str_data in stream_datas]
                 stream_data_post = [str_data[onset_history_len:] for str_data in stream_datas]
                 
-                done = False
                 stream_outs = np.zeros((0,48))
                 n_steps = len(beat_audio_contexts_backward)
-                #while not done:
                 for _ in tqdm(range((n_steps // batch_size)+1)):
                     if len(beat_audio_contexts_backward)>=batch_size:
                         stream_inp = [beat_audio_contexts_backward[:batch_size], 
@@ -919,16 +921,20 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
 
             # Initialize batch arrays
             batch_step_hist = np.zeros((len(diffs), 65, 258))
-            batch_actx = np.ones((len(diffs), 15, 9, 80, 3)) * np.log(1e-16)
+            if model_size == 'Large':
+                batch_actx = np.ones((len(diffs), 15, 9, 80, 3)) * np.log(1e-16)
+            else:
+                batch_actx = np.ones((len(diffs), 9, 80, 1)) * np.log(1e-16)
             batch_last_step = np.zeros(len(diffs))
             all_selected_steps = {diff: [] for diff in diffs}
 
-            # Pre-populate initial context for each diff
-            for diff_idx, diff in enumerate(diffs):
-                placed_times = all_placed_times[diff]
-                for i in range(min(8, len(placed_times))):
-                    time = placed_times[i]
-                    batch_actx[diff_idx, i+7] = make_onset_feature_context(song_feats, int(time*100), 4)
+            if model_size == 'Large':
+                # Pre-populate initial context for each diff
+                for diff_idx, diff in enumerate(diffs):
+                    placed_times = all_placed_times[diff]
+                    for i in range(min(8, len(placed_times))):
+                        time = placed_times[i]
+                        batch_actx[diff_idx, i+7] = make_onset_feature_context(song_feats, int(time*100), 4)
 
             # Process all steps in batches
             for step_idx in tqdm(range(max_steps)):
@@ -948,7 +954,10 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                 # Update batch arrays for valid diffs
                 current_batch_size = len(valid_diffs)
                 current_step_hist = np.zeros((current_batch_size, 65, 258))
-                current_actx = np.zeros((current_batch_size, 15, 9, 80, 3))
+                if model_size=='Large':
+                    current_actx = np.zeros((current_batch_size, 15, 9, 80, 3))
+                else:
+                    current_actx = np.zeros((current_batch_size, 9, 80, 1))
                 
                 for batch_pos, (diff_idx, diff) in enumerate(zip(batch_indices, valid_diffs)):
                     placed_times = all_placed_times[diff]
@@ -968,7 +977,10 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                     batch_actx[diff_idx, :-1] = batch_actx[diff_idx, 1:]
                     
                     # Update context
-                    batch_actx[diff_idx, -1] = make_onset_feature_context(song_feats, int(right_time*100), 4)
+                    if model_size=='Large':
+                        batch_actx[diff_idx, -1] = make_onset_feature_context(song_feats, int(right_time*100), 4)
+                    else:
+                        batch_actx[diff_idx] = make_onset_feature_context(song_feats, int(time*100), 4)
                     
                     # Calculate step positions
                     step_positions = {t: np.argwhere(subdiv_beats == t)[0] for t in placed_times}
@@ -983,11 +995,18 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                     current_actx[batch_pos] = batch_actx[diff_idx]
                 
                 # Run batch prediction
-                batch_predictions = sym_model.predict(
-                    (current_actx[:, :8], current_actx[:, 7:], current_step_hist), 
-                    batch_size=current_batch_size, 
-                    verbose=0
-                )
+                if model_size=='Large':
+                    batch_predictions = sym_model.predict(
+                        (current_actx[:, :8], current_actx[:, 7:], current_step_hist), 
+                        batch_size=current_batch_size, 
+                        verbose=0
+                    )
+                else:
+                    batch_predictions = sym_model.predict(
+                        (current_actx, current_step_hist), 
+                        batch_size=current_batch_size, 
+                        verbose=0
+                    )
                 
                 # Process predictions and update states
                 for batch_pos, (diff_idx, diff) in enumerate(zip(batch_indices, valid_diffs)):

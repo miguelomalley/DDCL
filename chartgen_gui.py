@@ -42,16 +42,33 @@ class ChartGenApp:
             'diffs': tk.StringVar(value='Beginner,Easy,Medium,Hard,Challenge'),
             'maxstep': tk.IntVar(value=12),
             'use_song_length': tk.BooleanVar(value=False),
-            'bpm_method': tk.StringVar(value='DDCL')
+            'bpm_method': tk.StringVar(value='DDCL'),
+            'max_bpm': tk.IntVar(value=200),
+            'min_bpm': tk.IntVar(value=80),
+            'model_size': tk.StringVar(value='Large'),
+        }
+
+        self.difficulty_vars = {
+            'Beginner': tk.BooleanVar(value=True),
+            'Easy': tk.BooleanVar(value=True),
+            'Medium': tk.BooleanVar(value=True),
+            'Hard': tk.BooleanVar(value=True),
+            'Challenge': tk.BooleanVar(value=True)
         }
 
         self.create_widgets()
 
     def create_widgets(self):
-        frame = ttk.Frame(self.root, padding=10)
-        frame.grid(row=0, column=0, sticky='nsew')
+        notebook = ttk.Notebook(self.root)
+        notebook.grid(row=0, column=0, sticky='nsew')
 
-        def add_entry(label_text, var, row, browse=False, directory=False):
+        basic_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(basic_frame, text="Basic")
+
+        advanced_frame = ttk.Frame(notebook, padding=10)
+        notebook.add(advanced_frame, text="Advanced")
+
+        def add_entry(frame, label_text, var, row, browse=False, directory=False):
             ttk.Label(frame, text=label_text).grid(row=row, column=0, sticky='w')
             entry = ttk.Entry(frame, textvariable=var, width=50)
             entry.grid(row=row, column=1, sticky='ew')
@@ -64,55 +81,64 @@ class ChartGenApp:
                     if path:
                         var.set(path)
                 ttk.Button(frame, text="Browse", command=browse_fn).grid(row=row, column=2)
-
+        #Basic
         row = 0
-        add_entry("Onset Model File", self.params['onset_model_fp'], row, browse=True)
+        add_entry(basic_frame, "Onset Model File", self.params['onset_model_fp'], row, browse=True)
         row += 1
-        add_entry("Symbolic Model File", self.params['sym_model_fp'], row, browse=True)
+        add_entry(basic_frame, "Symbolic Model File", self.params['sym_model_fp'], row, browse=True)
         row += 1
-        add_entry("Input Directory", self.params['in_directory'], row, browse=True, directory=True)
+        add_entry(basic_frame, "Input Directory", self.params['in_directory'], row, browse=True, directory=True)
         row += 1
-        add_entry("Output Directory", self.params['out_directory'], row, browse=True, directory=True)
-        row += 1
-
-        ttk.Label(frame, text="Batch Size").grid(row=row, column=0, sticky='w')
-        ttk.Entry(frame, textvariable=self.params['batch_size']).grid(row=row, column=1)
+        add_entry(basic_frame, "Output Directory", self.params['out_directory'], row, browse=True, directory=True)
         row += 1
 
-        ttk.Label(frame, text="Model Frame Density").grid(row=row, column=0, sticky='w')
-        ttk.Entry(frame, textvariable=self.params['model_frame_density']).grid(row=row, column=1)
+        ttk.Label(basic_frame, text="Model Size").grid(row=row, column=0, sticky='w')
+        ttk.Combobox(basic_frame, textvariable=self.params['model_size'], values=['Large', 'Small']).grid(row=row, column=1)
         row += 1
 
-        ttk.Label(frame, text="Onset History Length").grid(row=row, column=0, sticky='w')
-        ttk.Entry(frame, textvariable=self.params['onset_history_len']).grid(row=row, column=1)
+        ttk.Label(basic_frame, text="BPM Method").grid(row=row, column=0, sticky='w')
+        ttk.Combobox(basic_frame, textvariable=self.params['bpm_method'], values=['DDCL', 'AV', 'SMEdit']).grid(row=row, column=1)
         row += 1
 
-        ttk.Label(frame, text="Threshold").grid(row=row, column=0, sticky='w')
-        ttk.Entry(frame, textvariable=self.params['threshold']).grid(row=row, column=1)
+        ttk.Label(basic_frame, text="Max BPM").grid(row=row, column=0, sticky='w')
+        ttk.Entry(basic_frame, textvariable=self.params['max_bpm']).grid(row=row, column=1)
         row += 1
 
-        self.difficulty_vars = {
-            'Beginner': tk.BooleanVar(value=True),
-            'Easy': tk.BooleanVar(value=True),
-            'Medium': tk.BooleanVar(value=True),
-            'Hard': tk.BooleanVar(value=True),
-            'Challenge': tk.BooleanVar(value=True)  # or "Expert" if you prefer
-        }
+        ttk.Label(basic_frame, text="Min BPM").grid(row=row, column=0, sticky='w')
+        ttk.Entry(basic_frame, textvariable=self.params['min_bpm']).grid(row=row, column=1)
+        row += 1
 
-        ttk.Label(frame, text="Select Difficulties:").grid(row=row, column=0, sticky='nw')
-        diff_frame = ttk.Frame(frame)
+        ttk.Label(basic_frame, text="Select Difficulties:").grid(row=row, column=0, sticky='nw')
+        diff_frame = ttk.Frame(basic_frame)
         diff_frame.grid(row=row, column=1, sticky='w')
 
         for i, (label, var) in enumerate(self.difficulty_vars.items()):
             ttk.Checkbutton(diff_frame, text=label, variable=var).grid(row=i, column=0, sticky='w')
         row += 1
-        ttk.Label(frame, text="BPM Method").grid(row=row, column=0, sticky='w')
-        ttk.Combobox(frame, textvariable=self.params['bpm_method'], values=['DDCL', 'AV', 'SMEdit']).grid(row=row, column=1)
-        row += 1
-        self.progress = ttk.Progressbar(frame, orient='horizontal', mode='determinate', length=300)
+
+        self.progress = ttk.Progressbar(basic_frame, orient='horizontal', mode='determinate', length=300)
         self.progress.grid(row=row, column=0, columnspan=3, pady=5)
         row += 1
-        ttk.Button(frame, text="Generate Charts", command=self.start_generation).grid(row=row, column=0, columnspan=3, pady=10)
+
+        ttk.Button(basic_frame, text="Generate Charts", command=self.start_generation).grid(row=row, column=0, columnspan=3, pady=10)
+
+        #Advanced
+        adv_row = 0
+
+        ttk.Label(advanced_frame, text="Batch Size").grid(row=adv_row, column=0, sticky='w')
+        ttk.Entry(advanced_frame, textvariable=self.params['batch_size']).grid(row=adv_row, column=1)
+        adv_row += 1
+
+        ttk.Label(advanced_frame, text="Model Frame Density").grid(row=adv_row, column=0, sticky='w')
+        ttk.Entry(advanced_frame, textvariable=self.params['model_frame_density']).grid(row=adv_row, column=1)
+        adv_row += 1
+
+        ttk.Label(advanced_frame, text="Onset History Length").grid(row=adv_row, column=0, sticky='w')
+        ttk.Entry(advanced_frame, textvariable=self.params['onset_history_len']).grid(row=adv_row, column=1)
+        adv_row += 1
+
+        ttk.Label(advanced_frame, text="Threshold").grid(row=adv_row, column=0, sticky='w')
+        ttk.Entry(advanced_frame, textvariable=self.params['threshold']).grid(row=adv_row, column=1)
 
     def run_generation_thread(self):
         try:
@@ -135,7 +161,10 @@ class ChartGenApp:
                 maxstep=self.params['maxstep'].get(),
                 use_song_length=self.params['use_song_length'].get(),
                 bpm_method=self.params['bpm_method'].get(),
-                progress_callback=progress_tracker  # NEW
+                progress_callback=progress_tracker,
+                max_bpm=self.params['max_bpm'].get(),
+                min_bpm=self.params['min_bpm'].get(),
+                model_size=self.params['model_size'].get(),
             )
 
             self.root.after(0, lambda: messagebox.showinfo("Success", "Chart generation completed."))
