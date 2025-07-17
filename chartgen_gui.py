@@ -1,8 +1,9 @@
 import tkinter as tk
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
 import threading
 import os
 from tkinter import filedialog, messagebox
-from tkinter import ttk
 
 from models import generate_charts
 
@@ -195,7 +196,7 @@ class ChartGenApp:
             self._set_state_recursive(child, state)
 
 def main():
-    root = tk.Tk()
+    root = ttk.Window(themename="solar") 
     app = ChartGenApp(root)
     root.mainloop()
 
