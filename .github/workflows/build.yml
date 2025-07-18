@@ -28,11 +28,11 @@ jobs:
         pip install pyinstaller
 
     - name: Build with PyInstaller
-      run: |
-        pyinstaller --noconfirm --onefile --windowed chartgen_gui.py\
-          --hidden-import=ttkbootstrap \
-          --hidden-import=ttkbootstrap.themes \
-          --hidden-import=PIL._tkinter_finder
+      run: >
+        pyinstaller --noconfirm --onefile --windowed chartgen_gui.py
+        --hidden-import=ttkbootstrap
+        --hidden-import=ttkbootstrap.themes
+        --hidden-import=PIL._tkinter_finder
 
 
     - name: Upload artifact
