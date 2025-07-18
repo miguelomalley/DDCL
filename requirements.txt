@@ -1,7 +1,6 @@
 numpy==1.26.0
 tensorflow==2.18.0
 scipy
-tqdm
 librosa
 mutagen
 ttkbootstrap

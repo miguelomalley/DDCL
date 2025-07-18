@@ -11,7 +11,6 @@ import copy as c
 import pickle
 import shutil
 import math
-from tqdm import tqdm
 
 seed = 420
 
@@ -866,7 +865,7 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                 
                 stream_outs = np.zeros((0,48))
                 n_steps = len(beat_audio_contexts_backward)
-                for _ in tqdm(range((n_steps // batch_size)+1)):
+                for _ in range((n_steps // batch_size)+1):
                     if len(beat_audio_contexts_backward)>=batch_size:
                         stream_inp = [beat_audio_contexts_backward[:batch_size], 
                                     beat_audio_contexts_forward[:batch_size], 
@@ -941,7 +940,7 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
                         batch_actx[diff_idx, i+7] = make_onset_feature_context(song_feats, int(time*100), 4)
 
             # Process all steps in batches
-            for step_idx in tqdm(range(max_steps)):
+            for step_idx in range(max_steps):
                 # Prepare batch inputs
                 valid_diffs = []
                 batch_indices = []
