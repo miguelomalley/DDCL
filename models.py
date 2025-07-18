@@ -1069,12 +1069,15 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
 
             print('Saving to {}'.format(out_song_path))
             try:
+                out_song_name = os.path.splitext(song)[0]
                 if not os.path.isdir(out_song_path):
                     os.mkdir(out_song_path)
                 audio_out_fp = os.path.join(out_song_path, audio_out_name)
                 if not os.path.exists(audio_out_fp):
                     shutil.copyfile(song_in, audio_out_fp)
-                with open(os.path.join(out_song_path, out_dir_name + '.sm'), 'w') as f:
+                sm_filename = out_song_name + '.sm'
+                sm_fp = os.path.join(out_song_path, sm_filename)
+                with open(sm_fp, 'w', encoding='utf-8') as f:
                     f.write(sm_txt)
             except:
                 raise Exception('Error during output')
