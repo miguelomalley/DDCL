@@ -170,7 +170,7 @@ class ChartGenApp:
 
             self.root.after(0, lambda: messagebox.showinfo("Success", "Chart generation completed."))
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
+            self.root.after(0, lambda e=e: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
         finally:
             self.root.after(0, self.enable_ui)
 

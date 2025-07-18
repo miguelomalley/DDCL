@@ -9,7 +9,6 @@ import os
 import gc
 import copy as c
 import pickle
-from essentia.standard import MetadataReader
 import shutil
 import math
 from tqdm import tqdm
@@ -790,14 +789,19 @@ def generate_charts(onset_model_fp='trained_models/onset_model.keras',
 
             beats, subdiv_beats, bpm_shift_times, offset, bpm_str, song_length, bpm = set_bpm(song_in, bpm_method=bpm_method, max_tempo=max_bpm, min_tempo=min_bpm)
             
-            topdiff = int(round((bpm/10)-(3-math.log(song_length,2))))
+            topdiff = int(np.round((bpm/10)-(3-math.log(song_length,2))))
             fine_diffs = {diffs[i]:topdiff - (4-i) for i in range(5)}
             
-            meta_reader = MetadataReader(filename=song_in)
-            metadata = meta_reader() if callable(meta_reader) else ("", "")
+            tags = read_metadata(song_in)
 
-            title = metadata[0] if metadata and metadata[0] else os.path.splitext(os.path.basename(song_in))[0]
-            artist = metadata[1] if metadata and metadata[1] else "Unknown Artist"
+            # Extract title and artist with fallbacks
+            title = tags.get('title', [None])[0]  # get first title if exists
+            if not title:
+                title = os.path.splitext(os.path.basename(song_in))[0]
+
+            artist = tags.get('artist', [None])[0]
+            if not artist:
+                artist = "Unknown Artist"
 
             # Clean up characters
             title = title.replace(":", "").replace(";", "")

@@ -26,7 +26,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
-        pip install ttkbootstrap pillow tensorflow numpy==1.26.0 tensorflow==2.18.0 scipy tqdm essentia
+        pip install ttkbootstrap pillow tensorflow numpy==1.26.0 tensorflow==2.18.0 scipy tqdm mutagen librosa
 
     - name: Build with PyInstaller
       run: >

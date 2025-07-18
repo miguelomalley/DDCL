@@ -1,11 +1,17 @@
 import os
 import pickle
 import numpy as np
-from essentia.standard import MonoLoader, FrameGenerator, Windowing, Spectrum, MelBands, RhythmExtractor2013
-import essentia.standard as es
+import librosa
 import math
 from typing import List, Tuple, Dict
+from mutagen import File
 
+def read_metadata(audio_fp):
+    audio = File(audio_fp, easy=True)
+    if audio is None:
+        return {}
+
+    return audio.tags if audio.tags else {}
 def set_bpm(audio_fp, min_tempo = 100, max_tempo = 200, maxstep = 12, bpm_method = 'DDCL'):
     if bpm_method == 'DDCL':
         beat_dict = extract_BPM(audio_fp, min_tempo, max_tempo)
@@ -13,6 +19,7 @@ def set_bpm(audio_fp, min_tempo = 100, max_tempo = 200, maxstep = 12, bpm_method
         beats = beat_dict['beats']
 
         beat_intervals = list(beat_dict['beat_intervals'])
+        beat_intervals = [inty*100 for inty in beat_intervals]
         bpm_intervals = [60/gap for gap in beat_intervals]
 
         avg_point = 0
@@ -50,7 +57,7 @@ def set_bpm(audio_fp, min_tempo = 100, max_tempo = 200, maxstep = 12, bpm_method
 
         return beats, np.array(subdiv_beats), bpm_shift_times, offset, bpm_str, song_length, bpm
     elif bpm_method == 'AV':
-        beat_dict = arrow_vortex_get_bpm(audio_fp, bpm_range = (min_tempo, max_tempo))
+        beat_dict, _ = arrow_vortex_get_bpm(audio_fp, bpm_range = (min_tempo, max_tempo))
         bpm = beat_dict[0]['bpm']
         offset = beat_dict[0]['offset']
         beats = beat_dict[0]['beats']
@@ -89,279 +96,181 @@ def weighted_median(data):
 def hamming_window(w):
     return [0.54 - 0.46 * math.cos(2 * math.pi * n / (w - 1)) for n in range(w)]
 
-def arrow_vortex_get_bpm(audio_file, 
-                        window_size=1024, 
-                        hop_size=256,
-                        bpm_range=(89, 205),
-                        silence_threshold=-70,
-                        threshold_weight=0.1,
-                        threshold_window_size=7):
-    """
-    This is the algorithm described in Bram van de Wetering's Non-Causal Beat Tracking for Rhythm Games. 
-    Essentia is used but it would be easy to use Librosa too.
-    """
-    #load audio
-    loader = es.AudioLoader(filename=audio_file)
-    audio, sample_rate, _, _, _, _ = loader()
+def arrow_vortex_get_bpm(
+    audio_file,
+    window_size=1024,
+    hop_size=256,
+    bpm_range=(89, 205),
+    silence_threshold=-70,
+    threshold_weight=0.1,
+    threshold_window_size=7
+):
+    # 1. Load audio
+    audio, sr = librosa.load(audio_file, sr=None, mono=True)
     
-    #stereo to mono
-    if len(audio.shape) > 1:
-        audio = es.MonoMixer()(audio, 1)  # Mix to mono
+    # 2. Compute spectral flux (onset detection function)
+    #    We'll compute magnitude spectrogram and then differences
+    S = np.abs(librosa.stft(audio, n_fft=window_size, hop_length=hop_size, window='hann'))
+    flux = np.sqrt(np.sum(np.diff(S, axis=1).clip(min=0)**2, axis=0))
     
-    #PHASE 1: ONSET EXTRACTION
-    #phase vocoder for spectral flux
-    windowing = es.Windowing(type='hann', size=window_size)
-    fft = es.FFT(size=window_size)
-    magnitude = es.Magnitude()
-    spectral_flux = es.Flux()
+    # Pad flux so that len is consistent with frames produced in Essentia version
+    detection_function = np.concatenate(([0], flux))
     
-    #compute spectral flux
-    detection_function = []
-    
-    for frame in es.FrameGenerator(audio, frameSize=window_size, hopSize=hop_size):
-        windowed_frame = windowing(frame)
-        spectrum = fft(windowed_frame)
-        mag_spectrum = magnitude(spectrum)
-        flux = spectral_flux(mag_spectrum)
-        detection_function.append(flux)
-    
-    detection_function = np.array(detection_function)
-    
-    #thresholding
-    thresholds = []
-    
+    # 3. Adaptive thresholding
+    thresholds = np.zeros_like(detection_function)
+    L = threshold_window_size
     for n in range(len(detection_function)):
-        start = max(0, n - 5)
-        end = min(len(detection_function), n + 1)
-        window_data = detection_function[start:end]
-        
-        threshold = weighted_median(window_data) + threshold_weight * np.mean(window_data)
-        thresholds.append(threshold)
+        start = max(0, n - L + 1)
+        end   = n + 1
+        window = detection_function[start:end]
+        thresholds[n] = weighted_median(window) + threshold_weight * np.mean(window)
     
-    thresholds = np.array(thresholds)
-
-    onsets = []
-    for i in range(1, len(detection_function) - 1):
-        if (detection_function[i] > thresholds[i] and 
-            detection_function[i] > detection_function[i-1] and
-            detection_function[i] > detection_function[i+1]):
-            onsets.append(i)
+    is_peak = (
+        (detection_function[1:-1] > thresholds[1:-1]) &
+        (detection_function[1:-1] > detection_function[:-2]) &
+        (detection_function[1:-1] > detection_function[2:])
+    )
+    onsets = np.where(is_peak)[0] + 1
     
-    #silence gate
-    windowing = es.Windowing(type='hann', size=window_size)
-    spectrum = es.Spectrum(size=window_size)
-    frame_gen = es.FrameGenerator
-
-    filtered_onsets = []
-
-    for onset in onsets:
-        frame_start = onset * hop_size
-        frame_end = min(frame_start + window_size, len(audio))
-        frame_audio = audio[frame_start:frame_end]
-
-        if len(frame_audio) == 0:
+    # 4. Silence filtering on onsets
+    filtered = []
+    for o in onsets:
+        start_sample = o * hop_size
+        end_sample   = min(start_sample + window_size, len(audio))
+        frame = audio[start_sample:end_sample]
+        if len(frame) == 0:
             continue
-
-        if len(frame_audio) < window_size:
-            frame_audio = np.pad(frame_audio, (0, window_size - len(frame_audio)), mode='constant')
-
-        stft_frames = frame_gen(frame_audio, frameSize=window_size, hopSize=hop_size, startFromZero=True)
-
-        mean_energy = np.mean([
-            np.sum(spectrum(windowing(frame))**2)
-            for frame in stft_frames
-        ])
-
-        mean_energy_db = 10 * np.log10(max(mean_energy, 1e-10))
-
-        if mean_energy_db > silence_threshold:
-            filtered_onsets.append(onset)
-
-    onsets = np.array(filtered_onsets)
+        if len(frame) < window_size:
+            frame = np.pad(frame, (0, window_size - len(frame)))
+        # compute mean energy in dB
+        stft_f = librosa.stft(frame, n_fft=window_size, hop_length=hop_size, window='hann')
+        me = np.mean(np.sum(np.abs(stft_f)**2, axis=0))
+        me_db = 10 * np.log10(max(me, 1e-10))
+        if me_db > silence_threshold:
+            filtered.append(o)
+    onsets = np.array(filtered)
+    onset_times = onsets * hop_size / sr
+    last_onset_time = onset_times[-1] if len(onset_times) else 0.0
     
-    #convert onsets to time
-    onset_times = onsets * hop_size / sample_rate
-    last_onset_time = onset_times[-1] if len(onset_times) > 0 else 0
-    
-    #PHASE 2: BPM DETECTION
-    #BPM range to interval range
-    frame_rate = sample_rate / hop_size
+    # 5. BPM detection via interval histogram
+    frame_rate = sr / hop_size
     i_min = int(frame_rate * 60 / bpm_range[1])
     i_max = int(frame_rate * 60 / bpm_range[0])
+    test_intervals = np.arange(i_min, i_max+1, 10)
     
-    
-    #test every 10th interval
-    test_intervals = range(i_min, i_max + 1, 10)
     fitness_scores = {}
-    
     for interval in test_intervals:
-        #histogram for onset positions mod interval
-        histogram = np.zeros(interval)
-        for onset in onsets:
-            bin_idx = onset % interval
-            histogram[bin_idx] += 1
+        hist = np.zeros(interval, dtype=int)
+        for o in onsets:
+            hist[o % interval] += 1
         
-        #evidence function using Hamming window
-        hamming_size = min(interval // 4, 10)
-        hamming_weights = hamming_window(hamming_size)
-        
+        # sliding Hamming based evidence
+        hsize = min(interval // 4, 10)
+        win = np.hamming(hsize)
         evidence = np.zeros(interval)
         for p in range(interval):
-            for n in range(hamming_size):
-                bin_idx = int((p - hamming_size // 2 + n) % interval)
-                if n < len(hamming_weights):
-                    evidence[p] += hamming_weights[n] * histogram[bin_idx]
+            for n in range(hsize):
+                idx = (p - hsize//2 + n) % interval
+                evidence[p] += win[n] * hist[idx]
         
-        #confidence function
         confidence = np.zeros(interval)
         for p in range(interval):
-            conf1 = evidence[p]
-            conf2 = evidence[int((p + interval // 2) % interval)]
-            confidence[p] = conf1 + conf2 / 2
+            confidence[p] = evidence[p] + 0.5 * evidence[(p + interval//2) % interval]
         
         fitness_scores[interval] = np.max(confidence)
     
     if not fitness_scores:
-        print("BPM detection has failed, check max and min tempos, and also whether that was really a song you put in.")
-        return [], [], {}
+        raise RuntimeError("No fitness scores; check input track or bpm_range")
     
-    #fit third-degree polynomial to fitness values
     intervals = np.array(list(fitness_scores.keys()))
-    fitness_values = np.array(list(fitness_scores.values()))
-    
+    scores = np.array(list(fitness_scores.values()))
     if len(intervals) >= 4:
-        poly_coeffs = np.polyfit(intervals, fitness_values, 3)
-        poly_func = np.poly1d(poly_coeffs)
+        poly = np.poly1d(np.polyfit(intervals, scores, 3))
+        for iv in intervals:
+            fitness_scores[iv] -= poly(iv)
+    
+    max_fit = max(fitness_scores.values())
+    thr = 0.4 * max_fit
+    
+    cands = [(frame_rate * 60 / iv, fitness_scores[iv], iv)
+             for iv in fitness_scores if fitness_scores[iv] > thr]
+    cands.sort(key=lambda x: x[1], reverse=True)
+    
+    # Deduplicate within 0.1 BPM
+    final = []
+    for bpm, fit, iv in cands:
+        if not any(abs(bpm - fbpm) < 0.1 for fbpm, *_ in final):
+            final.append((bpm, fit, iv))
+        if len(final) >= 5:
+            break
+    
+    # 6. Offset & beat timing
+    results = []
+    for bpm, fit, iv in final:
+        interval = iv
+        hist = np.zeros(interval, dtype=int)
+        for o in onsets:
+            hist[o % interval] += 1
         
-        for interval in fitness_scores.keys():
-            bias_estimate = poly_func(interval)
-            fitness_scores[interval] = fitness_scores[interval] - bias_estimate
-    
-    #candidates after polynomial fitting
-    max_fitness = max(fitness_scores.values())
-    threshold_fitness = 0.4 * max_fitness
-    
-    candidates = []
-    for interval, fitness in fitness_scores.items():
-        if fitness > threshold_fitness:
-            #interval to BPM
-            bpm = frame_rate * 60 / interval
-            candidates.append((bpm, fitness, interval))
-    
-    #sort by fitness
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    
-    #remove similar candidates
-    filtered_candidates = []
-    for bpm, fitness, interval in candidates:
-        is_unique = True
-        for existing_bpm, _, _ in filtered_candidates:
-            if abs(bpm - existing_bpm) < 0.1:
-                is_unique = False
-                break
-        if is_unique:
-            filtered_candidates.append((bpm, fitness, interval))
-    
-    candidates = filtered_candidates[:5]
-    
-    #PHASE 3: OFFSET DETECTION
-    final_results = []
-    
-    for bpm, fitness, interval in candidates:
-        histogram = np.zeros(interval)
-        for onset in onsets:
-            bin_idx = onset % interval
-            histogram[bin_idx] += 1
-
-        hamming_size = min(interval // 4, 10)
-        hamming_weights = hamming_window(hamming_size)
-        
-        confidence = np.zeros(interval)
+        hsize = min(interval // 4, 10)
+        win = np.hamming(hsize)
+        conf = np.zeros(interval)
         for p in range(interval):
-            evidence = 0
-            for n in range(hamming_size):
-                bin_idx = int((p - hamming_size // 2 + n) % interval)
-                if n < len(hamming_weights):
-                    evidence += hamming_weights[n] * histogram[bin_idx]
-            
-            conf2 = 0
-            for n in range(hamming_size):
-                bin_idx = int((p + interval // 2 - hamming_size // 2 + n) % interval)
-                if n < len(hamming_weights):
-                    conf2 += hamming_weights[n] * histogram[bin_idx]
-            
-            confidence[p] = evidence + conf2 / 2
+            e1 = sum(win[n] * hist[(p - hsize//2 + n) % interval] for n in range(hsize))
+            e2 = sum(win[n] * hist[(p + interval//2 - hsize//2 + n) % interval] for n in range(hsize))
+            conf[p] = e1 + 0.5 * e2
         
-        p_max = np.argmax(confidence)
+        p_max = np.argmax(conf)
+        offset_s = p_max * hop_size / sr
+        inter_s = interval * hop_size / sr
         
-        #initial offset in seconds
-        offset_frames = p_max
-        offset_seconds = offset_frames * hop_size / sample_rate
-
-        interval_seconds = interval * hop_size / sample_rate
-        window_samples = int(0.05 * sample_rate)
+        # Beat vs offbeat energy slope
+        slopes_beat = []
+        slopes_off = []
+        window_samples = int(0.05 * sr)
+        t = offset_s
+        while t < len(audio)/sr - 0.1:
+            b = int(t * sr)
+            ob = int((t + inter_s/2) * sr)
+            if b-window_samples >= 0 and b+window_samples < len(audio):
+                slopes_beat.append(
+                    sum(np.abs(audio[b+1:b+window_samples+1])) -
+                    sum(np.abs(audio[b-window_samples:b]))
+                )
+            if ob-window_samples >= 0 and ob+window_samples < len(audio):
+                slopes_off.append(
+                    sum(np.abs(audio[ob+1:ob+window_samples+1])) -
+                    sum(np.abs(audio[ob-window_samples:ob]))
+                )
+            t += inter_s
         
-        beat_slopes = []
-        offbeat_slopes = []
+        if slopes_beat and slopes_off and np.mean(slopes_off) > np.mean(slopes_beat):
+            offset_s += inter_s/2
         
-        current_time = offset_seconds
-        while current_time < len(audio) / sample_rate - 0.1:
-            beat_sample = int(current_time * sample_rate)
-            offbeat_sample = int((current_time + interval_seconds / 2) * sample_rate)
-            
-            if beat_sample + window_samples < len(audio) and beat_sample - window_samples >= 0:
-                forward_sum = sum(abs(audio[beat_sample + n]) for n in range(1, window_samples + 1))
-                backward_sum = sum(abs(audio[beat_sample - window_samples + n]) for n in range(1, window_samples + 1))
-                beat_slope = max(forward_sum - backward_sum, 0)
-                beat_slopes.append(beat_slope)
-
-            if offbeat_sample + window_samples < len(audio) and offbeat_sample - window_samples >= 0:
-                forward_sum = sum(abs(audio[offbeat_sample + n]) for n in range(1, window_samples + 1))
-                backward_sum = sum(abs(audio[offbeat_sample - window_samples + n]) for n in range(1, window_samples + 1))
-                offbeat_slope = max(forward_sum - backward_sum, 0)
-                offbeat_slopes.append(offbeat_slope)
-            
-            current_time += interval_seconds
-
-        if beat_slopes and offbeat_slopes:
-            avg_beat = np.mean(beat_slopes)
-            avg_offbeat = np.mean(offbeat_slopes)
-            
-            if avg_offbeat > avg_beat:
-                offset_seconds += interval_seconds / 2
+        # Generate beat times
+        beat_step = 60.0 / bpm
+        times = []
+        b = offset_s
+        while b > 0:
+            b -= beat_step
+        while b < last_onset_time + beat_step:
+            if b >= 0:
+                times.append(b)
+            b += beat_step
         
-        #beat timings to make my life easier
-        beat_timings = []
-        beat_interval_seconds = 60.0 / bpm
- 
-        current_beat_time = offset_seconds
-
-        while current_beat_time > 0:
-            current_beat_time -= beat_interval_seconds
-        
-        while current_beat_time <= last_onset_time + beat_interval_seconds:
-            if current_beat_time >= 0:
-                beat_timings.append(current_beat_time)
-            current_beat_time += beat_interval_seconds
-        
-        final_results.append({
+        results.append({
             'bpm': bpm,
-            'offset': offset_seconds,
-            'fitness': fitness,
-            'confidence': np.max(confidence),
-            'beats': beat_timings,
+            'offset': offset_s,
+            'fitness': fit,
+            'confidence': np.max(conf),
+            'beats': times
         })
     
-    #maybe you want onsets too idk
-    #you ever think about the fact that OFFset is computed with something called an ONset haha
-    #return final_results, onset_times
-    print(f"Best bpm, offset: {final_results[0]['bpm']}, {final_results[0]['offset']}")
-    return final_results
+    best = results[0]
+    print(f"Best bpm, offset = {best['bpm']:.2f}, {best['offset']:.3f}s")
+    return results, onset_times
 
 class SMEditAudioSyncDetector:
-    '''
-    Instantiates a bpm detector imitating the one used in SMEditor. Similar to AV but with some process improvements.
-    '''
     def __init__(self, 
                  window_step: int = 512,
                  fft_size: int = 1024,
@@ -370,7 +279,6 @@ class SMEditAudioSyncDetector:
                  min_bpm: float = 125,
                  max_bpm: float = 250,
                  sample_rate: int = 44100):
-        
         self.window_step = window_step
         self.fft_size = fft_size
         self.tempo_fft_size = tempo_fft_size
@@ -378,20 +286,14 @@ class SMEditAudioSyncDetector:
         self.min_bpm = min_bpm
         self.max_bpm = max_bpm
         self.sample_rate = sample_rate
-        
+
         self.AVERAGE_WINDOW_RADIUS = 3
         self.TEMPOGRAM_SMOOTHING = 3
         self.TEMPOGRAM_OFFSET_THRESHOLD = 0.02
         self.TEMPOGRAM_GROUPING_WINDOW = 6
         self.OFFSET_LOOKAHEAD = 800
-        
-        # essentia init
-        self.windowing = es.Windowing(type='hann')
-        self.spectrum = es.Spectrum()
-        self.fft = es.FFT()
-        
-        # magic SMEdit numbers. I think these are supposed to replace the polyfit AV uses.
-        self.weight_data = [
+
+        self.weight_data = self.weight_data = [
             (20, 0.4006009013520281), (25, 0.4258037044922291), (31.5, 0.4536690484291709),
             (40, 0.4840856831659204), (50, 0.5142710208279764), (63, 0.5473453749315819),
             (80, 0.5841121495327103), (100, 0.6214074879602299), (125, 0.6601749463607856),
@@ -404,7 +306,6 @@ class SMEditAudioSyncDetector:
             (10000, 0.7369196757553427), (12500, 0.7768498737618955), (16000, 0.7698229407236336),
             (20000, 0.4311738708634257), (22550, 0.2), (25000, 0)
         ]
-        
         self.spectro_weights = None
         self.audio_data = None
         self.spectrogram = []
@@ -413,258 +314,124 @@ class SMEditAudioSyncDetector:
         self.novelty_curve_isolated = []
         self.tempogram = []
         self.tempogram_groups = []
-        
+
     def load_audio(self, audio_path: str) -> np.ndarray:
-        """Load audio file and convert to mono"""
-        loader = es.MonoLoader(filename=audio_path, sampleRate=self.sample_rate)
-        self.audio_data = loader()
-        #print(f"Loaded audio: {len(self.audio_data)} samples, {len(self.audio_data)/self.sample_rate:.2f} seconds")
+        self.audio_data, _ = librosa.load(audio_path, sr=self.sample_rate, mono=True)
         return self.audio_data
-    
-    def _calculate_spectro_weights(self) -> np.ndarray:
-        """Calculate frequency weights based on ISO 226 approximation"""
-        weights = np.zeros(self.fft_size)
-        
-        for i in range(self.fft_size):
-            freq = (i / (self.fft_size / 2)) * self.sample_rate / 2
-            
-            # Find the closest weight points
-            weight_index = None
-            for j, (weight_freq, _) in enumerate(self.weight_data):
-                if weight_freq > freq:
-                    weight_index = j
+
+    def _calculate_spectro_weights(self):
+        weights = np.zeros(self.fft_size // 2 + 1)
+        for i in range(len(weights)):
+            freq = i * self.sample_rate / self.fft_size
+            for j, (wf, wv) in enumerate(self.weight_data):
+                if wf > freq:
                     break
-            
-            if weight_index is None or weight_index == 0:
-                weights[i] = 0
-                continue
-                
-            # Linear interpolation in log space
-            lower_freq, lower_weight = self.weight_data[weight_index - 1]
-            higher_freq, higher_weight = self.weight_data[weight_index]
-            
-            log_freq = np.log(1 + freq)
-            log_lower = np.log(1 + lower_freq)
-            log_higher = np.log(1 + higher_freq)
-            
-            if log_higher != log_lower:
-                t = (log_freq - log_lower) / (log_higher - log_lower)
-                weights[i] = lower_weight + t * (higher_weight - lower_weight)
             else:
-                weights[i] = lower_weight
-                
+                j = len(self.weight_data)
+            if j == 0 or j > len(self.weight_data)-1:
+                weights[i] = 0
+            else:
+                lo_f, lo_w = self.weight_data[j-1]
+                hi_f, hi_w = self.weight_data[j]
+                lf, lh = np.log1p(lo_f), np.log1p(hi_f)
+                f = np.log1p(freq)
+                t = (f-lf)/(lh-lf) if lh!=lf else 0
+                weights[i] = lo_w + t*(hi_w - lo_w)
         return weights
-    
-    def _render_block(self, block_num: int) -> np.ndarray:
-        """Process a single audio block to get spectrogram"""
-        if self.audio_data is None:
-            raise ValueError("Audio data not loaded")
-            
-        # Extract audio slice
-        start_idx = max(0, block_num * self.window_step - self.fft_size // 2)
-        end_idx = block_num * self.window_step + self.fft_size // 2
-        
-        audio_slice = np.zeros(self.fft_size, dtype=np.float32)
-        
-        # Handle boundaries
-        audio_start = max(0, start_idx)
-        audio_end = min(len(self.audio_data), end_idx)
-        slice_start = audio_start - start_idx
-        slice_end = slice_start + (audio_end - audio_start)
-        
-        if audio_end > audio_start:
-            audio_slice[slice_start:slice_end] = self.audio_data[audio_start:audio_end]
-        
-        # Apply Hann window and FFT
-        windowed = self.windowing(audio_slice)
-        spectrum_complex = self.fft(windowed)
-        
-        # Convert to magnitude spectrum
-        spectrum_mag = np.abs(spectrum_complex[:self.fft_size//2])
-        
-        # log scale
-        response = np.log(1 + spectrum_mag)
-        
-        return response
-    
-    def _calc_difference(self, block_num: int, current_spectrum: np.ndarray) -> np.ndarray:
-        """Calculate spectral difference with previous block"""
-        if block_num == 0:
-            previous = np.zeros_like(current_spectrum)
-        else:
-            previous = self.spectrogram[block_num - 1]
-            
-        # Spectral flux with weighting
-        diff = np.maximum(0, current_spectrum - previous) * self.spectro_weights[:len(current_spectrum)]
-        return diff
-    
-    def _calc_isolated_novelty(self, block_num: int):
-        """Calculate isolated novelty function with local averaging"""
-        # Update blocks around current position
-        for i in range(max(0, block_num - self.AVERAGE_WINDOW_RADIUS), block_num + 1):
-            if i >= len(self.novelty_curve):
-                continue
-                
-            # Calculate local average
-            start_idx = max(0, i - self.AVERAGE_WINDOW_RADIUS)
-            end_idx = min(len(self.novelty_curve), i + self.AVERAGE_WINDOW_RADIUS + 1)
-            
-            local_sum = sum(self.novelty_curve[start_idx:end_idx])
-            local_avg = local_sum / (end_idx - start_idx)
-            
-            # Isolated novelty
-            isolated = max(0, self.novelty_curve[i] - local_avg)
-            
-            # Extend list if necessary
-            while len(self.novelty_curve_isolated) <= i:
-                self.novelty_curve_isolated.append(0)
-                
-            self.novelty_curve_isolated[i] = np.log(1 + isolated)
-    
+
+    def _render_block(self, block_num: int):
+        start = block_num * self.window_step - self.fft_size//2
+        end   = start + self.fft_size
+        slice_ = np.zeros(self.fft_size, dtype=float)
+        a_s = max(0, start); a_e = min(len(self.audio_data), end)
+        s_s = a_s - start; s_e = s_s + (a_e - a_s)
+        if a_e > a_s:
+            slice_[s_s:s_e] = self.audio_data[a_s:a_e]
+        mag = np.abs(librosa.stft(slice_, n_fft=self.fft_size, hop_length=self.fft_size+1, window='hann')[:,0])
+        return np.log1p(mag)
+
+    def _calc_difference(self, block_num, curr):
+        prev = self.spectrogram[block_num-1] if block_num>0 else np.zeros_like(curr)
+        return np.maximum(0, curr - prev) * self.spectro_weights
+
+    def _calc_isolated_novelty(self, i):
+        lo = max(0, i - self.AVERAGE_WINDOW_RADIUS)
+        hi = min(len(self.novelty_curve), i + self.AVERAGE_WINDOW_RADIUS + 1)
+        avg = np.mean(self.novelty_curve[lo:hi])
+        while len(self.novelty_curve_isolated) <= i:
+            self.novelty_curve_isolated.append(0)
+        self.novelty_curve_isolated[i] = np.log1p(max(0, self.novelty_curve[i] - avg))
+
     def detect_onsets(self, threshold: float = 0.3) -> List[float]:
-        """Detect onset times based on novelty curve"""
         if self.audio_data is None:
-            raise ValueError("Audio data not loaded")
-            
-        print("Computing spectrogram and novelty curve...")
-        
-        # Initialize weights
+            raise ValueError
         self.spectro_weights = self._calculate_spectro_weights()
-        
-        # Calculate number of blocks
-        max_blocks = int(np.ceil(len(self.audio_data) / self.window_step))
-        
-        # Reset arrays
-        self.spectrogram = []
-        self.spectogram_difference = []
-        self.novelty_curve = []
-        self.novelty_curve_isolated = []
-        
-        # Process each block
-        for block_num in range(max_blocks):                
-            # Get spectrum
-            spectrum = self._render_block(block_num)
-            self.spectrogram.append(spectrum)
-            
-            # Calculate difference
-            diff = self._calc_difference(block_num, spectrum)
+        total_blocks = int(np.ceil(len(self.audio_data)/self.window_step))
+        self.spectrogram.clear()
+        self.spectogram_difference.clear()
+        self.novelty_curve.clear()
+        self.novelty_curve_isolated.clear()
+
+        for i in range(total_blocks):
+            sp = self._render_block(i)
+            self.spectrogram.append(sp)
+            diff = self._calc_difference(i, sp)
             self.spectogram_difference.append(diff)
-            
-            # Sum for novelty curve
-            novelty_sum = np.sum(diff)
-            self.novelty_curve.append(novelty_sum)
-            
-            # Calculate isolated novelty
-            self._calc_isolated_novelty(block_num)
-        
-        # Detect peaks
+            self.novelty_curve.append(np.sum(diff))
+            self._calc_isolated_novelty(i)
+
         peaks = []
         for i in range(1, len(self.novelty_curve_isolated)):
-            if (self.novelty_curve_isolated[i] > threshold and 
+            if (self.novelty_curve_isolated[i] > threshold and
                 self.novelty_curve_isolated[i] > self.novelty_curve_isolated[i-1]):
-                
-                # Convert block to time
-                time_seconds = (i * self.window_step) / self.sample_rate
-                peaks.append(time_seconds)
-        
-        #print(f"Found {len(peaks)} onsets")
+                peaks.append(i * self.window_step / self.sample_rate)
         return peaks
-    
+
     def detect_tempo_and_offset(self) -> Tuple[List[Dict], List[Dict]]:
-        """Detect tempo and offset information"""
         if not self.novelty_curve_isolated:
-            raise ValueError("Must run detect_onsets first")
-        
-        # Scale novelty curve to max 1
-        novelty_array = np.array(self.novelty_curve_isolated)
-        max_val = np.max(novelty_array)
-        if max_val > 0:
-            scaled_novelty = novelty_array / max_val
-        else:
-            scaled_novelty = novelty_array
-        
-        # Calculate tempogram
-        max_tempo_blocks = int(np.ceil(len(scaled_novelty) / self.tempo_step))
-        self.tempogram = []
-        self.tempogram_groups = []
-        
-        for block_num in range(max_tempo_blocks):   
-            # Extract slice for tempo analysis
-            start_idx = max(0, block_num * self.tempo_step - self.tempo_fft_size // 2)
-            end_idx = block_num * self.tempo_step + self.tempo_fft_size // 2
-            
-            tempo_slice = np.zeros(self.tempo_fft_size, dtype=np.float32)
-            
-            # Handle boundaries
-            data_start = max(0, start_idx)
-            data_end = min(len(scaled_novelty), end_idx)
-            slice_start = data_start - start_idx
-            slice_end = slice_start + (data_end - data_start)
-            
-            if data_end > data_start:
-                tempo_slice[slice_start:slice_end] = scaled_novelty[data_start:data_end]
-            
-            # Apply Hann window and FFT
-            windowed = tempo_slice * np.hanning(self.tempo_fft_size)
-            fft_result = np.fft.fft(windowed)
-            response = np.abs(fft_result[:self.tempo_fft_size//2])
-            
-            # Log scale
-            response = np.log(1 + response)
-            
-            # Convert FFT bins to BPM
+            raise ValueError
+        nov = np.array(self.novelty_curve_isolated)
+        if nov.max() > 0:
+            nov /= nov.max()
+
+        max_tb = int(np.ceil(len(nov)/self.tempo_step))
+        self.tempogram.clear()
+        self.tempogram_groups.clear()
+        for b in range(max_tb):
+            start = b*self.tempo_step - self.tempo_fft_size//2
+            end = start + self.tempo_fft_size
+            slice_ = np.zeros(self.tempo_fft_size, dtype=float)
+            ds = max(0, start); de = min(len(nov), end)
+            ss = ds - start; se = ss + (de-ds)
+            if de > ds:
+                slice_[ss:se] = nov[ds:de]
+            windowed = slice_ * np.hanning(self.tempo_fft_size)
+            resp = np.log1p(np.abs(np.fft.rfft(windowed)))
             tempos = {}
-            for i, value in enumerate(response):
-                if value == 0:
+            for i, v in enumerate(resp):
+                tmp = (self.sample_rate * 60)/(self.window_step * self.tempo_fft_size) * i
+                if tmp>self.max_bpm*4 or tmp<self.min_bpm/4:
                     continue
-                    
-                # Calculate BPM from FFT bin
-                tmp = (self.sample_rate * 60) / (self.window_step * self.tempo_fft_size) * i
-                
-                if tmp > self.max_bpm * 4 or tmp < self.min_bpm / 4:
-                    continue
-                    
-                # Octave reduction
-                while tmp > self.max_bpm and not np.isinf(tmp):
+                while tmp>self.max_bpm:
                     tmp /= 2
-                while tmp < self.min_bpm and tmp != 0:
+                while tmp<self.min_bpm:
                     tmp *= 2
-                    
-                bpm = round(tmp, 3)
-                if bpm not in tempos:
-                    tempos[bpm] = 0
-                tempos[bpm] += value
-            
-            # Sort by confidence
-            tempo_list = [{'bpm': bpm, 'value': value} for bpm, value in tempos.items()]
-            tempo_list.sort(key=lambda x: x['value'], reverse=True)
-            self.tempogram.append(tempo_list[:10])  # Keep top 10
-            
-            # Group similar tempos
+                bpm = np.round(tmp, 3)
+                tempos[bpm] = tempos.get(bpm, 0) + v
+            tlist = [{'bpm':k,'value':v} for k,v in tempos.items()]
+            tlist.sort(key=lambda x: x['value'], reverse=True)
+            self.tempogram.append(tlist[:10])
             groups = []
-            for tempo in tempo_list[:10]:
-                # Find closest group
-                closest_group = None
-                for group in groups:
-                    if (abs(group['center'] - tempo['bpm']) < self.TEMPOGRAM_GROUPING_WINDOW):
-                        closest_group = group
-                        break
-                
-                if closest_group is None:
-                    groups.append({
-                        'center': tempo['bpm'],
-                        'groups': [tempo],
-                        'avg': tempo['bpm']
-                    })
+            for t in tlist[:10]:
+                grp = next((g for g in groups if abs(g['center'] - t['bpm']) < self.TEMPOGRAM_GROUPING_WINDOW), None)
+                if grp is None:
+                    groups.append({'center': t['bpm'], 'groups':[t], 'avg': t['bpm']})
                 else:
-                    closest_group['groups'].append(tempo)
-                    total_weight = sum(g['value'] for g in closest_group['groups'])
-                    weighted_sum = sum(g['bpm'] * g['value'] for g in closest_group['groups'])
-                    closest_group['avg'] = weighted_sum / total_weight if total_weight > 0 else tempo['bpm']
-            
+                    grp['groups'].append(t)
+                    total = sum(g['value'] for g in grp['groups'])
+                    grp['avg'] = sum(g['bpm']*g['value'] for g in grp['groups'])/total
             self.tempogram_groups.append(groups)
-        
-        # Extract top BPMs and calculate offsets
+
         return self._calculate_bpm_and_offset()
     
     def _calculate_bpm_and_offset(self) -> Tuple[List[Dict], List[Dict]]:
@@ -700,7 +467,7 @@ class SMEditAudioSyncDetector:
                         total_blocks += 1
                 
                 if total_blocks > 0:
-                    bpm = round(bpm_total / total_blocks)
+                    bpm = np.round(bpm_total / total_blocks)
                     bpm_counts[bpm] = bpm_counts.get(bpm, 0) + 1
         
         # Get top BPMs
@@ -739,7 +506,7 @@ class SMEditAudioSyncDetector:
             n = 0
             for j in range(1, 5):  # harmonics 1-4
                 weight = 1 / j
-                phase_weight = max(1 - abs(round(beat_block * j) / j - beat_block) * 12, 0)
+                phase_weight = max(1 - abs(np.round(beat_block * j) / j - beat_block) * 12, 0)
                 n += phase_weight * weight
                 t += weight
             analyze_wave.append(n / t if t > 0 else 0)
@@ -776,7 +543,7 @@ class SMEditAudioSyncDetector:
             for opt in options[:5]:
                 confidence = opt['response'] / total_response if total_response > 0 else 0
                 offset_results.append({
-                    'offset': round(opt['offset'], 3),
+                    'offset': np.round(opt['offset'], 3),
                     'confidence': confidence
                 })
             
@@ -798,7 +565,7 @@ class SMEditAudioSyncDetector:
         current_time = offset
         while current_time < audio_duration:
             if current_time >= 0:  # Only include positive times
-                beat_times.append(round(current_time, 3))
+                beat_times.append(np.round(current_time, 3))
             current_time += beat_interval
         
         return beat_times
@@ -1023,7 +790,7 @@ def front_null(dataset, frames = 7, front_set = 'None', back_null = False):
         dataset = np.append(dataset, front, axis = 0)
     return dataset
 
-def create_analyzers(fs=44100.0,
+def create_analyzers(fs=44100,
                      nhop=512,
                      nffts=[1024, 2048, 4096],
                      mel_nband=80,
@@ -1031,44 +798,66 @@ def create_analyzers(fs=44100.0,
                      mel_freqhi=16000.0):
     analyzers = []
     for nfft in nffts:
-        window = Windowing(size=nfft, type='blackmanharris62')
-        spectrum = Spectrum(size=nfft)
-        mel = MelBands(inputSize=(nfft // 2) + 1,
-                       numberBands=mel_nband,
-                       lowFrequencyBound=mel_freqlo,
-                       highFrequencyBound=mel_freqhi,
-                       sampleRate=fs)
-        analyzers.append((window, spectrum, mel))
+        analyzer = {
+            'nfft': nfft,
+            'mel_basis': librosa.filters.mel(sr=fs, n_fft=nfft, n_mels=mel_nband,
+                                             fmin=mel_freqlo, fmax=mel_freqhi),
+            'window': np.blackman(nfft)  # closest to blackmanharris62
+        }
+        analyzers.append(analyzer)
     return analyzers
 
-def extract_mel_feats(audio_fp, analyzers, fs=44100.0, nhop=512, nffts=[1024, 2048, 4096], log_scale=True):
-    # Extract features
-    loader = MonoLoader(filename=audio_fp, sampleRate=fs)
-    samples = loader()
+def extract_mel_feats(audio_fp, analyzers, fs=44100, nhop=512, nffts=[1024, 2048, 4096], log_scale=True):
+    y, _ = librosa.load(audio_fp, sr=fs, mono=True)
     feat_channels = []
-    for nfft, (window, spectrum, mel) in zip(nffts, analyzers):
-        feats = []
-        for frame in FrameGenerator(samples, nfft, nhop):
-            frame_feats = mel(spectrum(window(frame)))
-            feats.append(frame_feats)
-        feat_channels.append(feats)
 
-    # Transpose to move channels to axis 2 instead of axis 0
-    feat_channels = np.transpose(np.stack(feat_channels), (1, 2, 0))
+    for analyzer in analyzers:
+        nfft = analyzer['nfft']
+        mel_basis = analyzer['mel_basis']
+        window = analyzer['window']
 
-    # Apply numerically-stable log-scaling
-    # Value 1e-16 comes from inspecting histogram of raw values and picking some epsilon >2 std dev left of mean
+        # Compute STFT
+        stft = librosa.stft(y, n_fft=nfft, hop_length=nhop, window=window, center=True)
+        mag = np.abs(stft)**2  # Power spectrum
+
+        # Apply mel filterbank
+        mel_spec = mel_basis @ mag
+
+        # Transpose to (frames, bands)
+        mel_spec = mel_spec.T
+
+        feat_channels.append(mel_spec)
+
+    # Stack all channels (n_frames, n_mels, n_ffts)
+    feat_channels = np.stack(feat_channels, axis=-1)
+
     if log_scale:
         feat_channels = np.log(feat_channels + 1e-16)
 
     return feat_channels
 
-def extract_BPM(audio_fp, min_tempo = 100, max_tempo = 200):
-    audio = MonoLoader(filename = audio_fp)()
-    rhythm_extractor = RhythmExtractor2013(method="multifeature", minTempo = min_tempo, maxTempo = max_tempo)
-    bpm, beats, beats_confidence, _, beats_intervals = rhythm_extractor(audio)
-    beat_dict={'BPM' : bpm, 'offset' : 2*beats[0]-beats[1], 'beats' : beats, 'beat_intervals': beats_intervals}
-    return beat_dict
+def extract_BPM(audio_fp, min_tempo=100, max_tempo=200):
+    y, sr = librosa.load(audio_fp, sr=None, mono=True)
+
+    # Estimate tempo
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, start_bpm=(min_tempo + max_tempo) / 2,
+                                           tightness=1000, trim=False, units='time')
+
+    # Convert to time
+    beat_times = librosa.frames_to_time(beats, sr=sr)
+
+    # Estimate beat intervals (spacing between beats)
+    beat_intervals = np.diff(beat_times)
+
+    # Estimate offset as in original: 2*beat0 - beat1
+    offset = 2 * beat_times[0] - beat_times[1] if len(beat_times) > 1 else 0.0
+
+    return {
+        'BPM': tempo,
+        'offset': offset,
+        'beats': beat_times.tolist(),
+        'beat_intervals': beat_intervals.tolist()
+    }
 
 def quick_reducify(ds, indices):
     return [[a[i] for i in indices] for a in ds]
