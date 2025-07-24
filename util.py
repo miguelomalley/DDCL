@@ -45,7 +45,7 @@ def set_bpm(audio_fp, min_tempo = 100, max_tempo = 200, maxstep = 12, bpm_method
 
         offset = beats[0]
 
-        song_length = beats[-1]/60
+        song_length = beats[-1]/.6
 
         subdiv_beats = []
         for j in range(len(beats)-1):
