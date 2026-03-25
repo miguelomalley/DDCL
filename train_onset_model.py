@@ -58,8 +58,8 @@ def get_parser():
     parser.add_argument('--model_name', type=str, default='onset',
                         help='Name of the model')
     
-    parser.add_argument('--use_full_chart', action='store_true', default=False, help='Use all charts for song')
-    parser.add_argument('--no-use_full_chart', dest='use_full_chart', action='store_false', help='Do not use all charts for songs')
+    parser.add_argument('--use_all_charts', action='store_true', default=False, help='Use all charts for song')
+    parser.add_argument('--no-use_all_charts', dest='use_all_charts', action='store_false', help='Do not use all charts for songs')
 
     parser.add_argument('--use_scheduler', action='store_true', default=False, help='Use lr scheduling')
     parser.add_argument('--no-use_scheduler', dest='use_scheduler', action='store_false', help='Do not use lr scheduling')
@@ -75,7 +75,6 @@ if __name__ == "__main__":
     train_onset_model(stream_labels_fp=args.stream_labels_fp,
                         shuffle = args.shuffle,
                         batch_size = args.batch_size,
-                        classification_scheme = args.classification_scheme,
                         memlen = args.memlen,
                         mem_size = args.mem_size,
                         nframes = args.nframes,
@@ -90,6 +89,6 @@ if __name__ == "__main__":
                         full_bidirectional = args.full_bidirectional,
                         conv3d = args.conv3d,
                         model_name = args.model_name,
-                        use_full_chart = args.use_full_chart,
+                        use_all_charts= args.use_all_charts,
                         use_scheduler = args.use_scheduler,
                         use_early_stop = args.use_early_stop)

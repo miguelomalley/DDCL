@@ -150,7 +150,7 @@ def get_inputs_and_gens_onset(trn_fp,
     trn_ds, tst_ds = get_dataset_fp_list(trn_fp, tst_fp)
     with open(lbl_fp, 'rb') as f:
         labels = pickle.load(f)
-    enc_dict = label_to_vect_dict(labels)
+    enc_dict = label_to_vect_dict(labels, force_max_len=48)
     if full_bidirectional:
         inp_shape_0 = (None,2*memlen+1,nframes,nmelbands,nchannels)
         inp_shape_1 = (None,2*memlen+1,2)
@@ -654,6 +654,7 @@ def get_sym_model(audio_ctx_inp,
     ],
     )
     print(model.summary())
+    return model
 
 
 def train_sym_model(shuffle = True,

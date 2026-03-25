@@ -1093,9 +1093,12 @@ def unravel_onehot(onehot, base):
 def downsample(dataset, down_key=2):
     return [[data[i] for i in range(0,len(data),down_key)] for data in dataset]
 
-def label_to_vect_dict(labels):
+def label_to_vect_dict(labels, force_max_len = None):
     values = [list(a) for a in labels]
-    max_len = np.lcm.reduce(np.unique([len(a) for a in values if len(a) != 0]))
+    if not force_max_len:
+        max_len = np.lcm.reduce(np.unique([len(a) for a in values if len(a) != 0]))
+    else:
+        max_len = force_max_len
 
     new_values = [np.zeros((max_len,)) for a in values]
     for i in range(len(new_values)):

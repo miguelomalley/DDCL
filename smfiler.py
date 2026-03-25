@@ -439,7 +439,7 @@ def extract_syms(dataset_fps = ['json/songs/songs_train.txt','json/songs/songs_t
                 if feats_dir:
                     song_feats_fp = os.path.join(feats_dir, '{}.pkl'.format(json_name))
 
-                sym_dicts = create_sym_dicts(meta, radius)
+                sym_dicts = create_sym_dicts(meta)
 
                 data = []
 
