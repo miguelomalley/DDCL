@@ -43,9 +43,14 @@ def generatorify_from_fp_list_onset(dataset_fp_list,
                     chart_tape = 0
                     chart_out = False
                 if not use_all_charts:
-                    chart_num = random.randint(0,len(charts[0])-1)
-                    newsong = [charts[i][chart_num] for i in range(3)]
-                    chart_out = True
+                    try:
+                        chart_num = random.randint(0,len(charts[0])-1)
+                        newsong = [charts[i][chart_num] for i in range(3)]
+                        chart_out = True
+                    except:
+                        del(charts)
+                        chart_out = True
+                        continue
                     del(charts)
                 else:
                     newsong = [charts[i][chart_tape] for i in range(3)]
@@ -423,9 +428,14 @@ def generatorify_from_fp_list_sym(dataset_fp_list,
                         chart_tape = 0
                         chart_out = False
                     if not use_all_charts:
-                        chart = random.choice(charts)
-                        del(charts)
-                        chart_out = True
+                        try:
+                            chart = random.choice(charts)
+                            del(charts)
+                            chart_out = True
+                        except:
+                            del(charts)
+                            chart_out = True
+                            continue
                     else:
                         chart = charts[chart_tape]
                         chart_tape += 1
